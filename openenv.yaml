@@ -1,0 +1,28 @@
+spec_version: 1
+name: lost_update_env
+version: 0.1.0
+type: space
+runtime: fastapi
+app: server.app:app
+port: 8000
+validation:
+  reward:
+    range: [0.0, 1.0]
+    oracle_tolerance: 0.0
+    floor_margin: 0.5
+  resources:
+    cpu: 1.0
+    memory_mb: 512
+    disk_mb: 256
+    episode_timeout_s: 60.0
+  network:
+    mode: no-network
+  capabilities:
+    verifier:
+      kind: reward_channel
+    oracle:
+      form: script
+      location: oracle/solve.py
+    declared_tools: [stat, read, update, create, delete, write, submit]
+  types:
+    tags: [agent-environment, concurrency, tool-use]
