@@ -22,6 +22,7 @@ asks for --yes before spending anything.
 """
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import sys
@@ -107,6 +108,7 @@ def main() -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--episodes", type=int, default=50, help="seeds per tier")
     parser.add_argument("--yes", action="store_true", help="confirm the spend")
+    parser.add_argument("--workers", type=int, default=8, help="episodes played in parallel")
     args = parser.parse_args()
 
     cost = estimate(args.model, args.episodes)
@@ -119,14 +121,15 @@ def main() -> int:
 
     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ["OPENROUTER_API_KEY"])
     out = Path(__file__).parent / f"llm_{args.model.replace('/', '_')}.jsonl"
-    rows = []
-    with out.open("w") as fh:
-        for tier in TIERS:
-            for seed in range(args.episodes):
-                row = play(client, args.model, seed, tier)
-                rows.append(row)
-                fh.write(json.dumps(row) + "\n")
-                fh.flush()
+    # Resume: keep finished episodes and only play the missing (tier, seed) pairs.
+    rows = [json.loads(line) for line in out.open()] if out.exists() else []
+    done = {(r["tier"], r["seed"]) for r in rows}
+    todo = [(t, s) for t in TIERS for s in range(args.episodes) if (t, s) not in done]
+    with out.open("a") as fh, ThreadPoolExecutor(max_workers=args.workers) as pool:
+        for row in pool.map(lambda ts: play(client, args.model, ts[1], ts[0]), todo):
+            rows.append(row)
+            fh.write(json.dumps(row) + "\n")
+            fh.flush()
 
     print("\n| tier | reward | used write | conflicts seen |")
     print("|---|---|---|---|")

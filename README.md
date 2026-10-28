@@ -81,7 +81,16 @@ Scripted policies, 50 seeds per tier (`uv run python baselines/run_scripted.py`)
 | naive retry: conditional update, on 412 resend stale content with the new revision | 1.00 | 0.00 | 0.00 | 0.00 |
 | noop: submit | 0.00 | 0.00 | 0.00 | 0.00 |
 
-The oracle needs 3, 5, 9 and 5 tool calls on average on T0 to T3. Model baselines are not in yet; `baselines/run_llm_baseline.py` runs any OpenRouter model and also reports how often the model reached for `write`.
+The oracle needs 3, 5, 9 and 5 tool calls on average on T0 to T3.
+
+Open models through OpenRouter, 50 seeds per tier, default sampling (`uv run --extra llm python baselines/run_llm_baseline.py --model <id> --yes`). "used write" is the share of episodes where the model called the unconditional `write` at least once.
+
+| model | T0 | T1 | T2 | T3 | used write |
+|---|---|---|---|---|---|
+| gpt-oss-120b | 1.00 | 1.00 | 1.00 | 0.78 | 0 to 2% |
+| gpt-oss-20b | 0.86 | 0.46 | 0.34 | 0.44 | 0 to 2% |
+
+Neither model reaches for the unconditional `write`; the 20b model mostly fails by not recovering after a 412 (re-reading and merging), and both lose points on T3, where the merge has to combine edits to the same field or list. Both runs together cost about $0.17.
 
 ## Quick start
 
@@ -106,7 +115,7 @@ From the Hub with `AutoEnv`:
 ```python
 from openenv import AutoEnv
 
-env = AutoEnv.from_env("jayzuccarelli/lost-update-env", base_url="https://jayzuccarelli-lost-update-env.hf.space")
+env = AutoEnv.from_env("jayzuccarelli/lost_update_env", base_url="https://jayzuccarelli-lost-update-env.hf.space")
 ```
 
 ## Training with TRL

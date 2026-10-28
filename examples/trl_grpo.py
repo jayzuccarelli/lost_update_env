@@ -1,7 +1,7 @@
 # /// script
 # dependencies = [
 #     "trl[vllm]>=1.16.0",
-#     "openenv-lost-update-env @ git+https://huggingface.co/spaces/jayzuccarelli/lost-update-env",
+#     "openenv-lost-update-env @ git+https://huggingface.co/spaces/jayzuccarelli/lost_update_env",
 # ]
 # ///
 # SPDX-License-Identifier: BSD-3-Clause
