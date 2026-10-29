@@ -3,10 +3,8 @@ title: Lost Update
 emoji: 📝
 colorFrom: indigo
 colorTo: gray
-sdk: docker
+sdk: static
 pinned: false
-app_port: 8000
-base_path: /web
 license: bsd-3-clause
 short_description: Edit a shared JSON doc while a rival writes to it
 tags:
@@ -110,12 +108,11 @@ with LostUpdateEnv(base_url="http://localhost:8000").sync() as env:
     print(env.call_tool("update", uri=meta["uri"], content=doc["content"], expected_revision=doc["revision"]))
 ```
 
-From the Hub with `AutoEnv`:
+From the Hub:
 
-```python
-from openenv import AutoEnv
-
-env = AutoEnv.from_env("jayzuccarelli/lost_update_env", base_url="https://jayzuccarelli-lost-update-env.hf.space")
+```bash
+git clone https://huggingface.co/spaces/jayzuccarelli/lost_update_env
+cd lost_update_env && uv sync && uv run server
 ```
 
 ## Training with TRL

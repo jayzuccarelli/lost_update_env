@@ -1,0 +1,243 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lost Update</title>
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:820px;margin:2rem auto;padding:0 16px;color:#1f2328;background:#fff}pre{background:#f6f8fa;padding:12px;overflow-x:auto;border-radius:6px}code{font-size:.9em}table{border-collapse:collapse;display:block;overflow-x:auto}td,th{border:1px solid #d0d7de;padding:4px 10px}a{color:#0969da}
+@media (prefers-color-scheme:dark){body{color:#e6edf3;background:#0d1117}pre{background:#161b22}td,th{border-color:#30363d}a{color:#4493f8}}</style></head><body>
+<p><a href="https://huggingface.co/spaces/jayzuccarelli/lost_update_env/tree/main">Browse the code</a></p>
+<h1>Lost Update</h1>
+<p>An environment where the agent edits a shared JSON document while a scripted rival writes to the same document between the agent's steps. Unlike merge-conflict environments that hand the agent a static file with conflict markers, the conflict here happens live: the agent only learns about it through revision preconditions (<code>update(..., expected_revision)</code> fails with a 412 and the current revision) and has to re-read, merge and retry. An unconditional <code>write</code> is also on the menu, so the environment measures whether the agent chooses the precondition at all, not just whether it can merge.</p>
+<h2>Why</h2>
+<p>When two writers read the same version of a document and each writes back its own copy, the second write silently erases the first. This is the lost update, and it shows up as soon as agents share a file, a memory store or a todo list. <em>Position: Multi-Agent Systems Should Prioritize Concurrency Control</em> (Yang, Li, Ji, Zhang and Jiang, ICML 2026; <a href="https://arxiv.org/abs/2608.18092">arXiv:2608.18092</a>, <a href="https://icml.cc/virtual/2026/poster/67076">ICML poster</a>) lists it among the core hazards of multi-agent systems, and calls for benchmarks that vary contention and for training agents to be concurrency aware.</p>
+<p>The fix is old and well understood. HTTP gives every representation an <code>ETag</code>; a client sends <code>If-Match</code> with the tag it read, and the server answers <code>412 Precondition Failed</code> if someone else wrote first (<a href="https://www.rfc-editor.org/rfc/rfc9110">RFC 9110, sections 8.8.3, 13.1.1 and 15.5.13</a>). The MCP Filesystems Working Group's <a href="https://github.com/modelcontextprotocol/experimental-ext-filesystems/blob/main/docs/problem-statements.md">problem statements</a> propose the same for MCP resources: an opaque revision returned by <code>stat</code> and <code>read</code>, writes conditional on it, and the current revision returned with the precondition error so the agent can re-read and retry. The protocol side is the easy part. What is missing is evidence that models use the precondition and repair their write correctly when it fails, and a place to train that skill. This environment is that place.</p>
+<h2>Episode</h2>
+<ol>
+<li><code>reset(seed, tier)</code> builds a document from one of four families (service config, agent memory note, todo list, user settings) and an instruction such as "Increase <code>stats.sessions</code> by 2" or "Set <code>api.timeout_ms</code> to 3 times the current value of <code>api.retry_interval_ms</code>".</li>
+<li>The agent calls tools. Right before each of its first <em>k</em> write attempts (<code>update</code>, <code>write</code>, <code>create</code> or <code>delete</code> on the document), the rival commits its next scheduled edit. Whatever the agent read is now stale.</li>
+<li>The episode ends on <code>submit()</code> or when the 16-call budget runs out, and the final document is graded.</li>
+</ol>
+<p>Concurrency is simulated, not real: rival writes are seeded and step-interleaved, not wall-clock races. The same seed gives the same document, task and rival schedule, and the same sequence of tool calls gives byte-identical results.</p>
+<h2>Tools</h2>
+<table>
+<thead>
+<tr>
+<th>tool</th>
+<th>behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>stat(uri)</code></td>
+<td><code>{revision, size}</code></td>
+</tr>
+<tr>
+<td><code>read(uri)</code></td>
+<td><code>{content, revision}</code>; content is JSON text</td>
+</tr>
+<tr>
+<td><code>update(uri, content, expected_revision)</code></td>
+<td>writes if the revision matches and returns the new one; otherwise <code>{status: 412, error: "precondition_failed", current_revision}</code> and nothing is written</td>
+</tr>
+<tr>
+<td><code>create(uri, content)</code></td>
+<td>fails with 409 if the URI exists</td>
+</tr>
+<tr>
+<td><code>delete(uri, expected_revision)</code></td>
+<td>conditional, 412 on mismatch</td>
+</tr>
+<tr>
+<td><code>write(uri, content)</code></td>
+<td>unconditional overwrite</td>
+</tr>
+<tr>
+<td><code>submit()</code></td>
+<td>ends the episode and returns the score breakdown</td>
+</tr>
+</tbody>
+</table>
+<p>Revisions are opaque strings compared exactly, like a strong ETag. Note the trap in the 412 response: it carries <code>current_revision</code>, so an agent can resend its stale content with the fresh revision and the server will accept it. That is still a lost update, and the grader treats it as one.</p>
+<h2>Tiers</h2>
+<table>
+<thead>
+<tr>
+<th>tier</th>
+<th>rival activity</th>
+<th>what it tests</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T0</td>
+<td>none</td>
+<td>control: is the task itself solvable</td>
+</tr>
+<tr>
+<td>T1</td>
+<td>one write to a different field, before the agent's first write attempt</td>
+<td>detect the conflict, re-read, reapply</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>2 to 4 writes to different fields, one before each of the agent's first <em>k</em> write attempts</td>
+<td>retry loops and step budget</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>one write that overlaps the agent's intent: both bump the same counter, both append to the same list, the rival changes a value the agent's edit depends on, or the rival renames the key the agent must set</td>
+<td>merge the intent, not the patch</td>
+</tr>
+</tbody>
+</table>
+<p>If <code>tier</code> is not given, it is drawn from the seed over T1 to T3.</p>
+<h2>Reward</h2>
+<p>Deterministic checks on JSON leaves, no LLM judge. With R the document after the rival writes that landed and E the result of applying the agent's intent to R:</p>
+<ul>
+<li><code>task</code>: share of the leaves the intent changes (E vs R) that the final document gets right.</li>
+<li><code>preserve</code>: share of landed rival writes still present, times the share of untouched fields still intact.</li>
+<li><code>reward = task * preserve</code>, in [0, 1].</li>
+</ul>
+<p>Doing nothing scores 0 (task 0). A blind overwrite from a stale read scores 0 on T1 to T3 (the rival's write is gone). Copying the rival's version back scores 0 (task 0). Writing only the requested field and dropping the rest scores 0. Lists compare as multisets. The breakdown also reports <code>conflicts_seen</code>, <code>blind_overwrites</code>, <code>write_calls</code>, <code>update_calls</code> and <code>steps</code>.</p>
+<h2>Baselines</h2>
+<p>Scripted policies, 50 seeds per tier (<code>uv run python baselines/run_scripted.py</code>):</p>
+<table>
+<thead>
+<tr>
+<th>policy</th>
+<th>T0</th>
+<th>T1</th>
+<th>T2</th>
+<th>T3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>oracle: read, conditional update, on 412 re-read + reapply + retry</td>
+<td>1.00</td>
+<td>1.00</td>
+<td>1.00</td>
+<td>1.00</td>
+</tr>
+<tr>
+<td>blind write: read, apply, <code>write</code></td>
+<td>1.00</td>
+<td>0.00</td>
+<td>0.00</td>
+<td>0.00</td>
+</tr>
+<tr>
+<td>naive retry: conditional update, on 412 resend stale content with the new revision</td>
+<td>1.00</td>
+<td>0.00</td>
+<td>0.00</td>
+<td>0.00</td>
+</tr>
+<tr>
+<td>noop: submit</td>
+<td>0.00</td>
+<td>0.00</td>
+<td>0.00</td>
+<td>0.00</td>
+</tr>
+</tbody>
+</table>
+<p>The oracle needs 3, 5, 9 and 5 tool calls on average on T0 to T3.</p>
+<p>Open models through OpenRouter, 50 seeds per tier, default sampling (<code>uv run --extra llm python baselines/run_llm_baseline.py --model &lt;id&gt; --yes</code>). "used write" is the share of episodes where the model called the unconditional <code>write</code> at least once.</p>
+<table>
+<thead>
+<tr>
+<th>model</th>
+<th>T0</th>
+<th>T1</th>
+<th>T2</th>
+<th>T3</th>
+<th>used write</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>gpt-oss-120b</td>
+<td>1.00</td>
+<td>1.00</td>
+<td>1.00</td>
+<td>0.78</td>
+<td>0 to 2%</td>
+</tr>
+<tr>
+<td>gpt-oss-20b</td>
+<td>0.86</td>
+<td>0.46</td>
+<td>0.34</td>
+<td>0.44</td>
+<td>0 to 2%</td>
+</tr>
+</tbody>
+</table>
+<p>Neither model reaches for the unconditional <code>write</code>; the 20b model mostly fails by not recovering after a 412 (re-reading and merging), and both lose points on T3, where the merge has to combine edits to the same field or list. Both runs together cost about $0.17.</p>
+<h2>Quick start</h2>
+<pre><code class="language-bash">uv sync
+uv run server                      # serves on :8000
+uv run python oracle/solve.py --url http://localhost:8000 --episodes 5
+</code></pre>
+<pre><code class="language-python">from lost_update_env import LostUpdateEnv
+
+with LostUpdateEnv(base_url=&quot;http://localhost:8000&quot;).sync() as env:
+    meta = env.reset(seed=7, tier=&quot;T1&quot;).observation.metadata
+    print(meta[&quot;instruction&quot;])
+    doc = env.call_tool(&quot;read&quot;, uri=meta[&quot;uri&quot;])
+    print(env.call_tool(&quot;update&quot;, uri=meta[&quot;uri&quot;], content=doc[&quot;content&quot;], expected_revision=doc[&quot;revision&quot;]))
+</code></pre>
+<p>From the Hub:</p>
+<pre><code class="language-bash">git clone https://huggingface.co/spaces/jayzuccarelli/lost_update_env
+cd lost_update_env &amp;&amp; uv sync &amp;&amp; uv run server
+</code></pre>
+<h2>Training with TRL</h2>
+<p><code>GRPOTrainer(environment_factory=...)</code> turns the public methods of a wrapper class into tools. <code>examples/trl_grpo.py</code> has the full script; the core is:</p>
+<pre><code class="language-python">class SharedDocument:
+    def __init__(self):
+        self.client = LostUpdateEnv(base_url=ENV_URL).sync().connect()
+
+    def reset(self, **kwargs) -&gt; str:
+        self.reward = 0.0
+        return self.client.reset().observation.metadata[&quot;instruction&quot;]
+
+    def update(self, uri: str, content: str, expected_revision: str) -&gt; str:
+        &quot;&quot;&quot;Replace the document only if its revision still equals expected_revision.
+
+        Args:
+            uri: Document URI.
+            content: The full new document as JSON text.
+            expected_revision: The revision your change is based on.
+        &quot;&quot;&quot;
+        return self._call(&quot;update&quot;, uri=uri, content=content, expected_revision=expected_revision)
+
+    # read, stat, write and submit follow the same pattern
+
+
+def reward_fn(environments, **kwargs):
+    return [env.reward for env in environments]
+
+
+trainer = GRPOTrainer(
+    model=&quot;Qwen/Qwen3-1.7B&quot;,
+    reward_funcs=reward_fn,
+    train_dataset=dataset,
+    environment_factory=SharedDocument,
+    args=GRPOConfig(num_generations=8),
+)
+</code></pre>
+<p>Each rollout holds one session, so set <code>MAX_CONCURRENT_ENVS</code> on the server (default 8) to at least the number of parallel rollouts.</p>
+<h2>Limits of v0</h2>
+<ul>
+<li>The rival is scripted, not a second learner. Making it a second policy is the natural next step.</li>
+<li>One document per episode, and the 412 carries no diff. A "semantic conflict details" variant (tell the agent which fields changed) is a planned knob.</li>
+<li>Rival writes land relative to the agent's write attempts, which models the read-to-write window but not every interleaving.</li>
+</ul>
+<h2>Citation</h2>
+<pre><code class="language-bibtex">@inproceedings{yang2026concurrency,
+  title     = {Position: Multi-Agent Systems Should Prioritize Concurrency Control},
+  author    = {Yang, Xin and Li, Letian and Ji, Zimo and Zhang, Terry Jingchen and Jiang, Wenyuan},
+  booktitle = {International Conference on Machine Learning (ICML)},
+  year      = {2026},
+  note      = {arXiv:2608.18092}
+}
+</code></pre>
+<h2>License</h2>
+<p>BSD-3-Clause. Author: Eugenio "Jay" Zuccarelli.</p></body></html>
